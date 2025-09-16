@@ -1,4 +1,20 @@
-# C.O.B.R.A. – Crypto‑Object Backup & Retrieval Assistant
+<p align="center">
+  <img src="assets/cobra.jpg" alt="COBRA Logo" width="300"/>
+</p>
+
+<h1 align="center">C.O.B.R.A.</h1>
+
+<p align="center"><i>Crypto-Object Backup & Retrieval Assistant</i></p>
+
+---
+
+<p align="center">
+  A command-line tool for enumerating, previewing, and securely collecting 
+  digital artefacts. Designed with forensic workflows in mind, 
+  COBRA combines speed, clarity, and precision.
+</p>
+
+---
 
 *C.O.B.R.A.* scans a Windows system for cryptocurrency‑related artefacts (wallet files, browser extensions, credential stores, cloud‑sync folders, and optionally the DPAPI protect folder). It copies the discovered items to a USB drive, records a SHA‑256 hash for each file, and generates a JSON manifest together with a session log.
 
