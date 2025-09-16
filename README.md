@@ -22,7 +22,7 @@
 
 ## How to use
 
-1. **Open PowerShell as Administrator** – the script needs elevated rights to read protected locations.  
+1. **Open PowerShell as Administrator** - the script needs elevated rights to read protected locations.  
 2. **Save the script** (e.g., `COBRA.ps1`) to a convenient folder.  
 3. **Run the script** with the desired options. Example for a full scan of the C: drive while preserving the original folder hierarchy on the USB:
 

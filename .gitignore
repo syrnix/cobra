@@ -62,7 +62,7 @@ out/
 *.iml
 
 # ==== Security / Secrets ============================================
-# Environment files – keep local credentials out of the repo
+# Environment files 
 .env
 .env.*
 .envrc
