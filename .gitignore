@@ -1,0 +1,107 @@
+# ==== Core OS / IDE / Editor artifacts ==============================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux
+*~
+
+# VS Code
+.vscode/
+.history/
+
+# JetBrains (IntelliJ, PyCharm, WebStorm, etc.)
+.idea/
+*.iml
+
+# Emacs / Vim
+*~
+\#*\#
+.*.swp
+*.swo
+
+# ==== Language‑specific build artefacts ===========================
+# Node / npm
+node_modules/
+npm-debug.log*
+yarn.lock
+package-lock.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.whl
+
+# Go
+bin/
+pkg/
+*.exe
+
+# Rust
+target/
+Cargo.lock
+
+# Java / Maven / Gradle
+target/
+out/
+*.class
+*.jar
+*.war
+*.ear
+*.iml
+
+# ==== Security / Secrets ============================================
+# Environment files – keep local credentials out of the repo
+.env
+.env.*
+.envrc
+.envrc.backup
+
+# SSH keys, certificates, etc.
+*.pem
+*.key
+id_rsa
+id_ed25519
+
+# ==== Miscellaneous =================================================
+# Logs
+*.log
+logs/
+log/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+*.old
+
+# Coverage reports
+coverage/
+*.lcov
+
+# Test artefacts
+*.snapshot
+*.testresult
+
+# Documentation builds
+site/
+docs/_site/
+*.html
+
+# Binary assets that are generated
+*.zip
+*.tar.gz
+*.tgz
+
