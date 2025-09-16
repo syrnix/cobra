@@ -1,19 +1,21 @@
 <#
 =====================================================================
- C.O.B.R.A. - Crypto-Object Backup & Retrieval Assistant
- Author: Syrnix
- Version: 1.3.0
- Date:   2025-09-16
- Description:
-   • Enumerates common wallet locations, browser stores, and generic
-     text files for crypto‑related keywords.
-   • Allows the analyst to specify which drives to scan.
-   • Generates a detailed JSON manifest + SHA‑256 hashes.
-   • Supports Dry‑Run, Quick, and Unattended modes.
-   • USB‑ready: asks for drive letter and saves artefacts there.
-Prerequisites:
-   • PowerShell 5.1+ (built‑in on Windows 10/11)
-   • Administrative privileges (to read protected folders)
+ C.O.B.R.A. – Crypto‑Object Backup & Retrieval Assistant
+ Version: 1.4.0
+ Author : Syrnix
+
+ PURPOSE
+   • Locate cryptocurrency wallet files, browser extensions, credential
+     stores, cloud‑sync folders and (optionally) the DPAPI protect folder.
+   • Copy everything to a USB stick, compute SHA‑256 hashes and write a
+     JSON manifest for later forensic analysis.
+   • Provide a **robust, throttled progress UI** for both scanning and
+     copying stages.
+
+ REQUIREMENTS
+   • PowerShell 5.1+ (built‑in on Windows 10/11)
+   • Run the script **as Administrator** (needed for protected folders)
+
 =====================================================================
 #>
 
@@ -25,7 +27,7 @@ param(
     [Parameter(ParameterSetName='Interactive')]
     [string[]] $Drives = @('C'),
 
-    # Run a shallow collection (wallet + browser only)
+    # Shallow run – skips the deep recursive scan
     [switch] $Quick,
 
     # Show plan only, no copy
@@ -34,27 +36,27 @@ param(
     # Preserve original folder hierarchy on the USB
     [switch] $PreserveHierarchy,
 
-    # Include the DPAPI protect folder (optional, may contain sensitive blobs)
+    # Include the DPAPI Protect folder (optional)
     [switch] $IncludeDPAPI,
 
-    # Run without any prompts (useful for automation)
+    # Run without any prompts (good for scheduled tasks)
     [Parameter(ParameterSetName='Unattended')]
     [switch] $Unattended,
 
-    # Show help
+    # Show help and exit
     [switch] $Help
 )
 
 if ($Help) {
-    . "$PSScriptRoot\${MyInvocation.MyCommand.Name}" -Help
+    Get-Help $MyInvocation.MyCommand.Path -Full
     exit
 }
 
 #endregion ------------------------------------------------------------------
 
-#region Global Variables ----------------------------------------------------
+#region Global state --------------------------------------------------------
 
-# Pre‑lower‑cased exclusion list (computed once)
+# Lower‑cased exclusion list (computed once)
 $global:Exclusions = @(
     "$env:SystemRoot",
     "$env:ProgramFiles",
@@ -63,15 +65,24 @@ $global:Exclusions = @(
     "$env:Windir\WinSxS"
 ) | ForEach-Object { $_.ToLower() }
 
-# Queue that will hold absolute source paths
+# Queue of absolute source paths that will be copied
 $global:Queue = @()
 
-# Manifest entries will be stored here
+# Manifest entries (will be serialized to JSON)
 $global:Manifest = @()
+
+# Simple stats object
+$global:Stats = [pscustomobject]@{
+    CopiedFiles       = 0
+    TotalBytesCopied  = 0
+    FailedCopies      = 0
+    SkippedFiles      = 0
+    SkippedBytes      = 0
+}
 
 #endregion ------------------------------------------------------------------
 
-#region Helper Functions ----------------------------------------------------
+#region Helper functions ----------------------------------------------------
 
 function Show-Banner {
     $banner = @"
@@ -83,12 +94,12 @@ function Show-Banner {
 ░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░ 
  ░▒▓██████▓▒░ ░▒▓██████▓▒░░▒▓███████▓▒░░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░ 
 
-                     C.O.B.R.A. v1.3.0
+                     C.O.B.R.A. v1.4.0
             Crypto‑Object Backup & Retrieval Assistant
 -------------------------------------------------------------------
 "@
     Write-Host $banner -ForegroundColor Green
-    Write-Host "Pre‑run checklist (please verify):" -ForegroundColor Cyan
+    Write-Host "Pre‑run checklist (verify before proceeding):" -ForegroundColor Cyan
     Write-Host " • PowerShell is running **as Administrator**"
     Write-Host " • USB drive is formatted FAT32/ExFAT and has ≥100 MiB free"
     Write-Host " • Destination folder will be created under <USB>\COBRA_Evidence\Session_<timestamp>"
@@ -100,11 +111,9 @@ function Write-Log {
         [string]$Message,
         [ConsoleColor]$Color = 'White'
     )
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $line = "$timestamp $Message"
-    # Write to console
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $line = "$ts $Message"
     Write-Host $line -ForegroundColor $Color
-    # Append to log file (created later)
     if ($global:LogPath) {
         $line | Out-File -FilePath $global:LogPath -Append -Encoding utf8
     }
@@ -116,11 +125,11 @@ function Compute-Hash {
     try {
         using ($stream = [IO.File]::OpenRead($Path)) {
             $hasher = [System.Security.Cryptography.SHA256]::Create()
-            $hashBytes = $hasher.ComputeHash($stream)
-            return ($hashBytes | ForEach-Object { $_.ToString('x2') }) -join ''
+            $bytes = $hasher.ComputeHash($stream)
+            return ($bytes | ForEach-Object { $_.ToString('x2') }) -join ''
         }
     } catch {
-        Write-Log "Failed to hash $Path: $_" Yellow
+        Write-Log "Failed to hash $Path : $_" Yellow
         return $null
     }
 }
@@ -149,13 +158,13 @@ function Prompt-For-UsbDrive {
         $minFree = 100 * 1MB
 
         if (-not (Test-Path $usbRoot)) {
-            Write-Log "Warning: Drive $raw does not exist or is not accessible. Try again." Red
+            Write-Log "⚠️  Drive $raw not found – try again." Red
             continue
         }
 
         $free = (Get-PSDrive $raw).Free
         if ($free -lt $minFree) {
-            Write-Log "Warning: USB drive $raw has less than 100 MiB free. Choose another drive." Red
+            Write-Log "⚠️  Drive $raw has less than 100 MiB free – choose another." Red
             continue
         }
 
@@ -165,9 +174,9 @@ function Prompt-For-UsbDrive {
 
 function Estimate-TotalSize {
     $total = 0
-    foreach ($item in $global:Queue) {
+    foreach ($p in $global:Queue) {
         try {
-            $info = Get-Item $item -ErrorAction Stop
+            $info = Get-Item $p -ErrorAction Stop
             if (-not $info.PSIsContainer) { $total += $info.Length }
         } catch {}
     }
@@ -177,7 +186,7 @@ function Estimate-TotalSize {
 function Show-QueuePreview {
     param(
         [int]$MaxEntries = 100,
-        [int]$TreeDepth = 3
+        [int]$TreeDepth  = 3
     )
     $preview = $global:Queue | Select-Object -First $MaxEntries
     $size = 0
@@ -186,8 +195,7 @@ function Show-QueuePreview {
         if ($fi -and -not $fi.PSIsContainer) { $size += $fi.Length }
     }
     $mb = [math]::Round($size/1MB,2)
-    Write-Log "Files queued for copy (first $MaxEntries): $($preview.Count)" Cyan
-    Write-Log "Estimated total size (preview): $mb MB" Cyan
+    Write-Log "`nQueue preview (first $MaxEntries items, ~${mb} MiB):" Cyan
     foreach ($p in $preview) {
         $rel = $p -replace '^[A-Z]:\\',''
         $parts = $rel.Split('\')
@@ -195,21 +203,104 @@ function Show-QueuePreview {
         Write-Host "  $display"
     }
     if ($global:Queue.Count -gt $MaxEntries) {
-        Write-Host "  ... ($($global:Queue.Count - $MaxEntries) more files not shown)"
+        Write-Host "  … ($($global:Queue.Count-$MaxEntries) more files not shown)"
     }
 }
 
+# -------------------------------------------------------------------------
+# Unified progress wrapper – works for any foreach‑style enumeration
+function Invoke-With-Progress {
+<#
+.SYNOPSIS
+    Executes a foreach loop while showing a throttled Write‑Progress bar.
+
+.PARAMETER Items
+    Collection to enumerate (array, IEnumerable, etc.).
+
+.PARAMETER Activity
+    Short description shown as the Progress “Activity”.
+
+.PARAMETER Status
+    Optional sub‑status (e.g. “Scanning files”, “Copying”).
+
+.PARAMETER ScriptBlock
+    Code to run for each element. The current element is passed as $_.
+
+.PARAMETER UpdateEvery
+    Minimum number of items processed before forcing an update
+    (default = 1, i.e. update on every percent change).
+
+.EXAMPLE
+    $files = Get-ChildItem -Recurse -File .
+    Invoke-With-Progress -Items $files `
+        -Activity "Deep‑scan (keyword)" `
+        -ScriptBlock {
+            if ($_.Length -lt 50MB -and (Select-String -Path $_.FullName -Pattern $regex -Quiet)) {
+                Add-To-Queue $_.FullName
+            }
+        }
+#>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][System.Collections.IEnumerable] $Items,
+        [Parameter(Mandatory)][string] $Activity,
+        [string] $Status = '',
+        [Parameter(Mandatory)][scriptblock] $ScriptBlock,
+        [int] $UpdateEvery = 1
+    )
+
+    $total = $Items.Count
+    if ($total -eq 0) {
+        Write-Host "⚠️  Nothing to process for '$Activity'." -ForegroundColor Yellow
+        return
+    }
+
+    $processed   = 0
+    $lastPercent = -1
+    $startTime   = Get-Date
+
+    try {
+        foreach ($item in $Items) {
+            $processed++
+            & $ScriptBlock $item
+
+            $percent = [int](($processed / $total) * 100)
+
+            # Update only when % changes or we hit $UpdateEvery items
+            if ($percent -ne $lastPercent -or ($processed % $UpdateEvery) -eq 0) {
+                $elapsed = (Get-Date) - $startTime
+                $etaSec = if ($percent -gt 0) {
+                    [int]($elapsed.TotalSeconds * (100 - $percent) / $percent)
+                } else { 0 }
+
+                Write-Progress -Activity $Activity `
+                               -Status $Status `
+                               -PercentComplete $percent `
+                               -CurrentOperation ("{0}/{1}" -f $processed,$total) `
+                               -SecondsRemaining $etaSec
+                $lastPercent = $percent
+            }
+        }
+    }
+    finally {
+        Write-Progress -Activity $Activity -Completed
+        $duration = (Get-Date) - $startTime
+        Write-Host ("✅  Finished '{0}' – processed {1:N0} items in {2:g}" -f $Activity,$total,$duration) `
+                   -ForegroundColor Green
+    }
+}
+# -------------------------------------------------------------------------
+
 #endregion ------------------------------------------------------------------
 
-#region Main Execution -----------------------------------------------------
+#region Main execution -------------------------------------------------------
 
-# -------------------- Banner & Summary ------------------------------------
 Show-Banner
 
-# Determine USB drive (skip prompt in unattended mode)
+# ---------- USB drive selection ----------
 if ($Unattended) {
     if (-not $env:COBRA_USB_DRIVE) {
-        Write-Log "Unattended mode requires env var COBRA_USB_DRIVE to be set." Red
+        Write-Log "🚫  Unattended mode requires env var COBRA_USB_DRIVE." Red
         exit 1
     }
     $usbDrive = $env:COBRA_USB_DRIVE.Trim().TrimEnd(':')
@@ -218,25 +309,26 @@ if ($Unattended) {
 }
 $usbRoot = "${usbDrive}:\"
 
-# Prepare destination folders
+# ---------- Destination layout ----------
 $backupRoot   = Join-Path $usbRoot "COBRA_Evidence"
 $timestamp    = Get-Date -Format "yyyyMMdd_HHmmss"
 $sessionFolder= Join-Path $backupRoot "Session_$timestamp"
 
-# Guard against accidental overwrite (should never happen because of timestamp)
 if (Test-Path $sessionFolder) {
-    Write-Log "Session folder already exists! Aborting to avoid data loss." Red
+    Write-Log "⚠️  Session folder already exists – aborting to avoid overwrite." Red
     exit 1
 }
 New-Item -ItemType Directory -Path $sessionFolder -Force | Out-Null
 
-# Initialise log file (same folder as manifest)
+# Log file (same folder as manifest)
 $global:LogPath = Join-Path $sessionFolder "session.log"
 Write-Log "=== C.O.B.R.A. run started ===" Green
 Write-Log "Destination root: $sessionFolder"
 
-# -------------------- Build collection queues ---------------------------
-Write-Log "`n[1/5] Queuing known wallet folders…" Cyan
+# ---------- Phase 1 – Known wallet / browser / cloud folders ----------
+Write-Log "`n[Phase 1] Queuing known locations…" Cyan
+
+# Wallet folders
 $walletFolders = @(
     "$env:APPDATA\Bitcoin",
     "$env:APPDATA\Ethereum\keystore",
@@ -245,18 +337,20 @@ $walletFolders = @(
     "$env:APPDATA\Litecoin",
     "$env:APPDATA\Armory"
 )
-foreach ($f in $walletFolders) { Add-To-Queue $f }
+$walletFolders | Invoke-With-Progress -Activity "Wallet folders" `
+    -ScriptBlock { param($f) Add-To-Queue $f }
 
-Write-Log "`n[2/5] Queuing browser extension directories…" Cyan
-$browserExtensionFolders = @(
+# Browser extensions
+$browserExtFolders = @(
     "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Extensions",
     "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\Default\Extensions",
     "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Extensions"
 )
-foreach ($f in $browserExtensionFolders) { Add-To-Queue $f }
+$browserExtFolders | Invoke-With-Progress -Activity "Browser extensions" `
+    -ScriptBlock { param($f) Add-To-Queue $f }
 
-Write-Log "`n[3/5] Queuing browser credential files…" Cyan
-$browserCredentialFiles = @(
+# Browser credential files
+$browserCredFiles = @(
     "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Login Data",
     "$env:LOCALAPPDATA\Google\Chrome\User Data\Local State",
     "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\Default\Login Data",
@@ -264,115 +358,72 @@ $browserCredentialFiles = @(
     "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Login Data",
     "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Local State"
 )
-foreach ($f in $browserCredentialFiles) { Add-To-Queue $f }
+$browserCredFiles | Invoke-With-Progress -Activity "Browser credential files" `
+    -ScriptBlock { param($f) Add-To-Queue $f }
 
-# Optional DPAPI folder
+# Optional DPAPI protect folder
 if ($IncludeDPAPI) {
-    Write-Log "`n[3b] Including DPAPI protect folder…" Cyan
     $dpapiFolder = "$env:APPDATA\Microsoft\Protect"
-    Add-To-Queue $dpapiFolder
+    $dpapiFolder | Invoke-With-Progress -Activity "DPAPI protect folder" `
+        -ScriptBlock { param($f) Add-To-Queue $f }
 }
 
-Write-Log "`n[4/5] Queuing cloud‑sync directories…" Cyan
+# Cloud sync folders
 $cloudSyncFolders = @(
     "$env:USERPROFILE\OneDrive",
     "$env:USERPROFILE\Dropbox",
     "$env:USERPROFILE\Google Drive"
 )
-foreach ($f in $cloudSyncFolders) { Add-To-Queue $f }
+$cloudSyncFolders | Invoke-With-Progress -Activity "Cloud‑sync folders" `
+    -ScriptBlock { param($f) Add-To-Queue $f }
 
-# Deep recursive search (skipped in Quick mode)
+# ---------- Phase 2 – Deep recursive scan (optional) ----------
 if (-not $Quick) {
-    Write-Log "`n[5/5] Performing deep recursive search…" Cyan
+    Write-Log "`n[Phase 2] Performing deep recursive scan…" Cyan
 
+    # Patterns we care about (filename‑only)
     $searchPatterns = @(
         "wallet.dat","*.wallet","*keystore*","UTC--*.json",
         "*.key","*.pem","*.seed","*.mnemonic"
     )
-    $textExtensions = @("*.txt","*.md","*.log")   # limit to true text files
+    # Text‑file extensions we will actually read
+    $textExtensions = @("*.txt","*.md","*.log")
+    # Keyword regex (case‑insensitive)
     $keywordRegex = '(mnemonic|seed|recovery|password|private\s*key|phrase)'
-    $maxScanSize   = 50MB
+    # Upper bound for reading a text file (avoid huge logs)
+    $maxScanSize = 50MB
 
-    foreach ($drive in $Drives) {
+    # Build a flat list of *candidate* files first – this keeps the progress bar smooth
+    $candidateFiles = foreach ($drive in $Drives) {
         $root = "${drive}:\"
-        if (-not (Test-Path $root)) {
-            Write-Log "Drive $drive does not exist – skipping." Yellow
-            continue
-        }
+        if (-not (Test-Path $root)) { continue }
 
-        # 1️⃣ Known wallet‑like filenames
+        # 1️⃣ Files matching known wallet‑like names
         foreach ($pat in $searchPatterns) {
             Get-ChildItem -Path $root -Filter $pat -File -Recurse -ErrorAction SilentlyContinue |
-                Where-Object { -not (Should-Exclude $_.FullName) } |
-                ForEach-Object { Add-To-Queue $_.FullName }
+                Where-Object { -not (Should-Exclude $_.FullName) }
         }
 
-        # 2️⃣ Text‑file keyword scan (stream‑based)
+        # 2️⃣ Text files that might contain keywords
         foreach ($ext in $textExtensions) {
             Get-ChildItem -Path $root -Include $ext -File -Recurse -ErrorAction SilentlyContinue |
-                Where-Object { -not (Should-Exclude $_.FullName) } |
-                ForEach-Object {
-                    try {
-                        if ($_.Length -lt $maxScanSize) {
-                            $found = Select-String -Path $_.FullName -Pattern $keywordRegex -SimpleMatch -Quiet -ErrorAction SilentlyContinue
-                            if ($found) { Add-To-Queue $_.FullName }
-                        }
-                    } catch {
-                        Write-Log "Error reading $($_.FullName): $($_.Exception.Message)" Yellow
-                    }
-                }
+                Where-Object { -not (Should-Exclude $_.FullName) }
         }
     }
-} else {
-    Write-Log "`n[5/5] Quick mode – deep recursive scan skipped." Cyan
-}
 
-# -------------------- Preview & Confirmation ----------------------------
-$totalQueued = $global:Queue.Count
-Write-Log "`nQueue built – $totalQueued items identified." Cyan
-Show-QueuePreview -MaxEntries 100 -TreeDepth 3
+    # Process the candidates with a progress bar
+    $candidateFiles | Invoke-With-Progress -Activity "Deep‑scan (filename + keyword)" `
+        -Status "Evaluating $($candidateFiles.Count) potential artefacts" `
+        -ScriptBlock {
+            param($item)
 
-# Verify we have enough space on the USB drive
-$estimatedSize = Estimate-TotalSize
-$freeOnUsb    = (Get-PSDrive $usbDrive).Free
-if ($estimatedSize -gt ($freeOnUsb - 100MB)) {
-    $needMb = [math]::Round($estimatedSize/1MB,2)
-    $freeMb = [math]::Round($freeOnUsb/1MB,2)
-    Write-Log "Insufficient free space on $usbDrive. Need ≈$needMb MB, have $freeMb MB." Red
-    exit 1
-}
-Write-Log "Estimated total payload size: $([math]::Round($estimatedSize/1MB,2)) MB" Cyan
+            # Fast‑path: filename already matches a wallet pattern
+            if ($searchPatterns -contains $item.Name) {
+                Add-To-Queue $item.FullName
+                return
+            }
 
-# Confirmation (auto‑yes in unattended mode)
-if ($Unattended) {
-    $proceed = $true
-} else {
-    $answer = Read-Host "`nProceed with copying all queued artefacts? (Y/N)"
-    $proceed = $answer -eq 'Y'
-}
-if (-not $proceed) {
-    Write-Log "Copy aborted by user." Red
-    exit 0
-}
-
-# Dry‑run handling
-if ($DryRun) {
-    Write-Log "`nDry‑Run mode active – no files will be copied." Yellow
-    Write-Log "=== C.O.B.R.A. finished (dry‑run) ===" Green
-    exit 0
-}
-
-# -------------------- Copy Operation -----------------------------------
-Write-Log "`nStarting copy operation…" Cyan
-
-$copied = 0
-$failed = 0
-$counter = 0
-$totalFiles = $global:Queue.Count
-$lastPct = -1
-
-foreach ($src in $global:Queue) {
-    $counter++
-    $pct = [int](($counter/$totalFiles)*100)
-    if ($pct -ne $lastPct) {
-        Write-Progress -Activity "COBRA
+            # Otherwise treat it as a possible text file and look for keywords
+            if ($item.Extension -in $textExtensions -and $item.Length -lt $maxScanSize) {
+                $found = Select-String -Path $item.FullName -Pattern $keywordRegex -SimpleMatch -Quiet -ErrorAction SilentlyContinue
+                if ($found) { Add
